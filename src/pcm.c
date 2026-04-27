@@ -121,7 +121,7 @@ int pcm_init(const char* dev, snd_pcm_stream_t stream, const struct ast_format* 
     memset(hwparams, 0, snd_pcm_hw_params_sizeof());
     snd_pcm_hw_params_any(handle, hwparams);
 
-    res = snd_pcm_hw_params_set_access(handle, hwparams, SND_PCM_ACCESS_MMAP_INTERLEAVED);
+    res = snd_pcm_hw_params_set_access(handle, hwparams, SND_PCM_ACCESS_RW_INTERLEAVED);
     if (res < 0) {
         ast_log(LOG_ERROR, "[ALSA][%s] HW Set access failed: %s\n", stream_str, snd_strerror(res));
         goto alsa_fail;

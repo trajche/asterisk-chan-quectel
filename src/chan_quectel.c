@@ -89,16 +89,26 @@ int soundcard_init(struct pvt* pvt)
         return -1;
     }
 
-    const int err = snd_pcm_link(pvt->icard, pvt->ocard);
-    if (err < 0) {
-        ast_log(LOG_ERROR, "[%s][ALSA] Couldn't link devices: %s\n", PVT_ID(pvt), snd_strerror(err));
-        snd_pcm_close(pvt->icard);
-        pvt->icard = NULL;
-        snd_pcm_close(pvt->ocard);
-        pvt->ocard          = NULL;
-        pvt->ocard_channels = 0u;
-        pvt->audio_fd       = -1;
-        return -1;
+    /* Intentionally NOT calling snd_pcm_link(): some Quectel UAC firmwares
+     * (EG25-G A0.300) deliver only zero-valued capture samples while the
+     * streams are linked. arecord/aplay do not link, and they work.
+     *
+     * Without a link the capture stream would otherwise stay in PREPARED
+     * state forever, since Asterisk only invokes our read callback when
+     * the audio_fd eventfd fires, and the eventfd only fires once the
+     * stream is RUNNING. Kick it. */
+    {
+        const int sres = snd_pcm_start(pvt->icard);
+        if (sres < 0) {
+            ast_log(LOG_ERROR, "[%s][ALSA][CAPTURE] snd_pcm_start failed: %s\n", PVT_ID(pvt), snd_strerror(sres));
+            snd_pcm_close(pvt->icard);
+            pvt->icard = NULL;
+            snd_pcm_close(pvt->ocard);
+            pvt->ocard          = NULL;
+            pvt->ocard_channels = 0u;
+            pvt->audio_fd       = -1;
+            return -1;
+        }
     }
 
     ast_verb(2, "[%s][ALSA] Sound card '%s' initialized\n", PVT_ID(pvt), CONF_UNIQ(pvt, alsadev));
@@ -108,10 +118,7 @@ int soundcard_init(struct pvt* pvt)
 void soundcard_close(struct pvt* pvt)
 {
     if (pvt->icard) {
-        const int err = snd_pcm_unlink(pvt->icard);
-        if (err < 0) {
-            ast_log(LOG_WARNING, "[%s][ALSA] Couldn't unlink devices: %s\n", PVT_ID(pvt), snd_strerror(err));
-        }
+        /* not linked, no unlink needed */
         pcm_close(CONF_UNIQ(pvt, alsadev), &pvt->icard, SND_PCM_STREAM_CAPTURE);
     }
     if (pvt->ocard) {

@@ -544,7 +544,7 @@ static struct ast_frame* channel_read_uac(struct cpvt* cpvt, struct pvt* pvt, si
     }
 
     void* const buf = cpvt_get_buffer(cpvt);
-    const int res   = snd_pcm_mmap_readi(pvt->icard, buf, frames);
+    const int res   = snd_pcm_readi(pvt->icard, buf, frames);
 
     switch (res) {
         case -EAGAIN:
@@ -755,13 +755,13 @@ static int channel_write_uac(struct ast_channel* attribute_unused(channel), stru
 
     ast_frame_byteswap_le(f);
     if (pvt->ocard_channels == 1u) {
-        res = snd_pcm_mmap_writei(pvt->ocard, f->data.ptr, samples);
+        res = snd_pcm_writei(pvt->ocard, f->data.ptr, samples);
     } else {
         void* d[pvt->ocard_channels];
         for (unsigned int i = 0; i < pvt->ocard_channels; ++i) {
             d[i] = f->data.ptr;
         }
-        res = snd_pcm_mmap_writen(pvt->ocard, (void**)&d, samples);
+        res = snd_pcm_writen(pvt->ocard, (void**)&d, samples);
     }
 
     switch (res) {
