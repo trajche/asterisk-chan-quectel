@@ -111,9 +111,65 @@ static int reopen_audio_port(struct pvt* pvt)
     return (pvt->audio_fd > 0);
 }
 
-static void pcm_show_playback_state(struct pvt* const pvt) { pcm_show_state(4, "PLAYBACK", PVT_ID(pvt), pvt->ocard); }
+/* Recover a stream stuck in XRUN/SETUP. The read/write callbacks in
+ * channel.c also do this, but they only run when the stream's eventfd
+ * fires — and the eventfd doesn't fire while the stream is XRUN, leaving
+ * us in a vicious circle. The monitor thread is the only thing that
+ * keeps ticking when audio I/O has stalled. */
+static void pcm_recover_if_xrun(struct pvt* const pvt, snd_pcm_t* const pcm, const char* const desc, int restart_capture)
+{
+    if (!pcm) {
+        return;
+    }
+    const snd_pcm_state_t state = snd_pcm_state(pcm);
+    if (state != SND_PCM_STATE_XRUN && state != SND_PCM_STATE_SETUP) {
+        return;
+    }
+    const int pres = snd_pcm_prepare(pcm);
+    if (pres) {
+        ast_log(LOG_WARNING, "[%s][ALSA][%s] XRUN recovery prepare failed: %s\n", PVT_ID(pvt), desc, snd_strerror(pres));
+        return;
+    }
+    if (restart_capture) {
+        const int sres = snd_pcm_start(pcm);
+        if (sres) {
+            ast_log(LOG_WARNING, "[%s][ALSA][%s] XRUN recovery start failed: %s\n", PVT_ID(pvt), desc, snd_strerror(sres));
+        }
+    }
+    ast_debug(3, "[%s][ALSA][%s] Recovered from %s\n", PVT_ID(pvt), desc, snd_pcm_state_name(state));
+}
 
-static void pcm_show_capture_state(struct pvt* const pvt) { pcm_show_state(4, "CAPTURE", PVT_ID(pvt), pvt->icard); }
+static void pcm_show_playback_state(struct pvt* const pvt)
+{
+    pcm_show_state(4, "PLAYBACK", PVT_ID(pvt), pvt->ocard);
+    pcm_recover_if_xrun(pvt, pvt->ocard, "PLAYBACK", 0);
+
+    /* Some firmwares — and some Asterisk usage patterns — leave the
+     * playback stream in PREPARED state with samples buffered but never
+     * cross the start threshold (because Asterisk writes one ptime at a
+     * time). Kick it. */
+    if (pvt->ocard) {
+        const snd_pcm_state_t state = snd_pcm_state(pvt->ocard);
+        if (state == SND_PCM_STATE_PREPARED) {
+            const snd_pcm_sframes_t avail = snd_pcm_avail_update(pvt->ocard);
+            snd_pcm_uframes_t buffer_size = 0, period_size = 0;
+            snd_pcm_get_params(pvt->ocard, &buffer_size, &period_size);
+            /* Start when we have at least one period buffered. */
+            if (avail >= 0 && (snd_pcm_uframes_t)avail < buffer_size) {
+                const int sres = snd_pcm_start(pvt->ocard);
+                if (sres && sres != -EBADFD) {
+                    ast_log(LOG_WARNING, "[%s][ALSA][PLAYBACK] Start failed: %s\n", PVT_ID(pvt), snd_strerror(sres));
+                }
+            }
+        }
+    }
+}
+
+static void pcm_show_capture_state(struct pvt* const pvt)
+{
+    pcm_show_state(4, "CAPTURE", PVT_ID(pvt), pvt->icard);
+    pcm_recover_if_xrun(pvt, pvt->icard, "CAPTURE", 1);
+}
 
 static int pcm_show_playback_state_taskproc(void* tpdata) { return PVT_TASKPROC_TRYLOCK_AND_EXECUTE(tpdata, pcm_show_playback_state); }
 

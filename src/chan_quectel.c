@@ -93,10 +93,10 @@ int soundcard_init(struct pvt* pvt)
      * (EG25-G A0.300) deliver only zero-valued capture samples while the
      * streams are linked. arecord/aplay do not link, and they work.
      *
-     * Without a link the capture stream would otherwise stay in PREPARED
-     * state forever, since Asterisk only invokes our read callback when
-     * the audio_fd eventfd fires, and the eventfd only fires once the
-     * stream is RUNNING. Kick it. */
+     * Without a link both streams need an explicit start. Capture's
+     * eventfd doesn't fire until RUNNING; playback (with NONBLOCK and a
+     * tiny start_threshold) accepts only partial writes while in
+     * PREPARED state and never crosses the threshold to start. */
     {
         const int sres = snd_pcm_start(pvt->icard);
         if (sres < 0) {
@@ -108,6 +108,24 @@ int soundcard_init(struct pvt* pvt)
             pvt->ocard_channels = 0u;
             pvt->audio_fd       = -1;
             return -1;
+        }
+        /* Playback needs samples buffered before snd_pcm_start succeeds.
+         * Pre-fill with one period of silence so the very first start
+         * sticks; otherwise snd_pcm_start returns -EBADFD until enough
+         * Asterisk frames accumulate, and on this firmware the stream
+         * never actually crosses the threshold. */
+        snd_pcm_uframes_t buf_sz = 0, per_sz = 0;
+        snd_pcm_get_params(pvt->ocard, &buf_sz, &per_sz);
+        if (per_sz > 0) {
+            int16_t* const silence = ast_calloc(per_sz, sizeof(int16_t));
+            if (silence) {
+                snd_pcm_writei(pvt->ocard, silence, per_sz);
+                ast_free(silence);
+            }
+        }
+        const int pres = snd_pcm_start(pvt->ocard);
+        if (pres && pres != -EBADFD) {
+            ast_log(LOG_WARNING, "[%s][ALSA][PLAYBACK] snd_pcm_start failed: %s\n", PVT_ID(pvt), snd_strerror(pres));
         }
     }
 

@@ -509,23 +509,34 @@ static struct ast_frame* channel_read_uac(struct cpvt* cpvt, struct pvt* pvt, si
 
     const snd_pcm_state_t state = snd_pcm_state(pvt->icard);
     switch (state) {
-        case SND_PCM_STATE_XRUN: {
-            const int res = snd_pcm_prepare(pvt->ocard);
-            if (res) {
-                ast_log(LOG_ERROR, "[%s][ALSA][PLAYBACK] Prepare failed - err:'%s'\n", PVT_ID(pvt), snd_strerror(res));
-            }
-        }
-
+        case SND_PCM_STATE_XRUN:
         case SND_PCM_STATE_SETUP: {
             const int res = snd_pcm_prepare(pvt->icard);
             if (res) {
                 ast_log(LOG_ERROR, "[%s][ALSA][CAPTURE] Prepare failed - state:%s err:'%s'\n", PVT_ID(pvt), snd_pcm_state_name(state), snd_strerror(res));
+                return NULL;
             }
-
+            /* Without snd_pcm_link the capture stream needs an explicit
+             * start after every (re)prepare; otherwise its eventfd never
+             * fires again and our read callback is never invoked. */
+            const int sres = snd_pcm_start(pvt->icard);
+            if (sres) {
+                ast_log(LOG_ERROR, "[%s][ALSA][CAPTURE] Start failed - state:%s err:'%s'\n", PVT_ID(pvt), snd_pcm_state_name(state), snd_strerror(sres));
+            }
             return NULL;
         }
 
-        case SND_PCM_STATE_PREPARED:
+        case SND_PCM_STATE_PREPARED: {
+            /* Defensive: a stream we (re)opened may be in PREPARED until
+             * the first read kicks it. Force a start so its eventfd
+             * begins firing instead of relying on Asterisk to poll us. */
+            const int sres = snd_pcm_start(pvt->icard);
+            if (sres && sres != -EBADFD) {
+                ast_log(LOG_WARNING, "[%s][ALSA][CAPTURE] Start failed - state:PREPARED err:'%s'\n", PVT_ID(pvt), snd_strerror(sres));
+            }
+            break;
+        }
+
         case SND_PCM_STATE_RUNNING:
             break;
 
@@ -728,13 +739,7 @@ static int channel_write_uac(struct ast_channel* attribute_unused(channel), stru
 
     const snd_pcm_state_t state = snd_pcm_state(pvt->ocard);
     switch (state) {
-        case SND_PCM_STATE_XRUN: {
-            res = snd_pcm_prepare(pvt->icard);
-            if (res) {
-                ast_log(LOG_ERROR, "[%s][ALSA][CAPTURE] Prepare failed - err:'%s'\n", PVT_ID(pvt), snd_strerror(res));
-                goto w_finish;
-            }
-        }
+        case SND_PCM_STATE_XRUN:
         case SND_PCM_STATE_SETUP:
             res = snd_pcm_prepare(pvt->ocard);
             if (res) {

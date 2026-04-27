@@ -60,16 +60,11 @@ static snd_pcm_uframes_t adjust_uframes(snd_pcm_uframes_t ptime, unsigned int ra
 
 static snd_pcm_uframes_t adjust_start_threshold(snd_pcm_uframes_t ptime)
 {
-    static const size_t PTIME_MIN_START_THRESHOLD = 100u;
-    static const size_t PTIME_MAX_START_THRESHOLD = 250u;
-
-    if (ptime < PTIME_MIN_START_THRESHOLD) {
-        return PTIME_MAX_START_THRESHOLD;
-    }
-    if (ptime > PTIME_MIN_START_THRESHOLD) {
-        return PTIME_MAX_START_THRESHOLD;
-    }
-
+    /* Original code clamped this to 100..250 ms but contained a bug that
+     * always returned the high end. With Asterisk handing us 20 ms voice
+     * frames one at a time, 250 ms means snd_pcm_writei never accumulates
+     * enough to start the playback stream — it stays PREPARED forever and
+     * the caller hears nothing. One ptime is enough. */
     return ptime;
 }
 
