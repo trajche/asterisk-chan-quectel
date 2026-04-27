@@ -67,8 +67,13 @@
 #include "smsdb.h"
 #include "tty.h"
 
-static int soundcard_init(struct pvt* pvt)
+int soundcard_init(struct pvt* pvt)
 {
+    if (pvt->icard || pvt->ocard) {
+        /* already opened */
+        return 0;
+    }
+
     const struct ast_format* const fmt = pvt_get_audio_format(pvt);
     unsigned int channels;
 
@@ -79,6 +84,8 @@ static int soundcard_init(struct pvt* pvt)
 
     if (pcm_init(CONF_UNIQ(pvt, alsadev), SND_PCM_STREAM_PLAYBACK, fmt, &pvt->ocard, &pvt->ocard_channels, NULL)) {
         ast_log(LOG_ERROR, "[%s][ALSA] Problem opening playback device '%s'\n", PVT_ID(pvt), CONF_UNIQ(pvt, alsadev));
+        pcm_close(CONF_UNIQ(pvt, alsadev), &pvt->icard, SND_PCM_STREAM_CAPTURE);
+        pvt->audio_fd = -1;
         return -1;
     }
 
@@ -90,11 +97,28 @@ static int soundcard_init(struct pvt* pvt)
         snd_pcm_close(pvt->ocard);
         pvt->ocard          = NULL;
         pvt->ocard_channels = 0u;
+        pvt->audio_fd       = -1;
         return -1;
     }
 
     ast_verb(2, "[%s][ALSA] Sound card '%s' initialized\n", PVT_ID(pvt), CONF_UNIQ(pvt, alsadev));
     return 0;
+}
+
+void soundcard_close(struct pvt* pvt)
+{
+    if (pvt->icard) {
+        const int err = snd_pcm_unlink(pvt->icard);
+        if (err < 0) {
+            ast_log(LOG_WARNING, "[%s][ALSA] Couldn't unlink devices: %s\n", PVT_ID(pvt), snd_strerror(err));
+        }
+        pcm_close(CONF_UNIQ(pvt, alsadev), &pvt->icard, SND_PCM_STREAM_CAPTURE);
+    }
+    if (pvt->ocard) {
+        pcm_close(CONF_UNIQ(pvt, alsadev), &pvt->ocard, SND_PCM_STREAM_PLAYBACK);
+        pvt->ocard_channels = 0;
+    }
+    pvt->audio_fd = -1;
 }
 
 static int public_state_init(struct public_state* state);
@@ -127,17 +151,10 @@ void pvt_disconnect(struct pvt* pvt)
     at_queue_flush(pvt);
 
     if (CONF_UNIQ(pvt, uac) > TRIBOOL_FALSE) {
-        if (pvt->icard) {
-            const int err = snd_pcm_unlink(pvt->icard);
-            if (err < 0) {
-                ast_log(LOG_WARNING, "[%s][ALSA] Couldn't unlink devices: %s", PVT_ID(pvt), snd_strerror(err));
-            }
-            pcm_close(CONF_UNIQ(pvt, alsadev), &pvt->icard, SND_PCM_STREAM_CAPTURE);
-        }
-        if (pvt->ocard) {
-            pcm_close(CONF_UNIQ(pvt, alsadev), &pvt->ocard, SND_PCM_STREAM_PLAYBACK);
-            pvt->ocard_channels = 0;
-        }
+        /* defensive close: streams should already be released after the last
+         * channel was removed (see pvt_on_remove_last_channel), but call
+         * close anyway in case we are tearing down with an active call. */
+        soundcard_close(pvt);
     } else {
         tty_close(CONF_UNIQ(pvt, audio_tty), pvt->audio_fd);
     }
@@ -231,12 +248,17 @@ static void pvt_start(struct pvt* const pvt)
     }
 
     if (CONF_UNIQ(pvt, uac) > TRIBOOL_FALSE) {
-        if (soundcard_init(pvt) < 0) {
-            pvt_disconnect(pvt);
-            goto cleanup_datafd;
-        }
+        /* In UAC mode we defer opening the ALSA streams until a call is
+         * actually active (pvt_on_create_1st_channel). Some Quectel
+         * firmwares (e.g. EG25-G EG25GGBR07A07M2G_A0.300) only push real
+         * PCM samples to the UAC endpoint when the host opens the stream
+         * after a voice call is established. Opening at module load and
+         * keeping the stream open results in zero-valued samples reaching
+         * Asterisk for the lifetime of the device.
+         *
+         * audio_fd will be set when the streams are opened on first call. */
+        pvt->audio_fd = -1;
     } else {
-        // TODO: delay until device activate voice call or at pvt_on_create_1st_channel()
         ast_verb(3, "[%s] Trying to open audio port %s...\n", PVT_ID(pvt), CONF_UNIQ(pvt, audio_tty));
         pvt->audio_fd = tty_open(CONF_UNIQ(pvt, audio_tty), pvt->is_simcom);
         if (pvt->audio_fd < 0) {
@@ -454,6 +476,23 @@ void pvt_on_create_1st_channel(struct pvt* pvt)
     const size_t silence_buf_size      = 2u * pvt_get_audio_frame_size(PTIME_PLAYBACK, fmt);
     pvt->silence_buf                   = ast_calloc(1, silence_buf_size + AST_FRIENDLY_OFFSET);
 
+    if (CONF_UNIQ(pvt, uac) > TRIBOOL_FALSE) {
+        /* Open ALSA streams now that a call exists. See note in pvt_start()
+         * about Quectel UAC firmware quirk. */
+        if (soundcard_init(pvt) < 0) {
+            ast_log(LOG_ERROR, "[%s][ALSA] Failed to open sound card on call start\n", PVT_ID(pvt));
+        } else {
+            /* Re-attach the new audio_fd to any existing channel so the read
+             * path uses the freshly opened poll descriptor. */
+            struct cpvt* cpvt;
+            AST_LIST_TRAVERSE(&pvt->chans, cpvt, entry) {
+                if (cpvt->channel) {
+                    ast_channel_set_fd(cpvt->channel, 0, pvt->audio_fd);
+                }
+            }
+        }
+    }
+
     if (CONF_SHARED(pvt, multiparty)) {
         if (CONF_UNIQ(pvt, uac) > TRIBOOL_FALSE) {
             ast_log(LOG_ERROR, "[%s] Multiparty mode not supported in UAC mode\n", PVT_ID(pvt));
@@ -480,6 +519,12 @@ void pvt_on_remove_last_channel(struct pvt* pvt)
     ast_free(pvt->write_buf);
     pvt->silence_buf = NULL;
     pvt->write_buf   = NULL;
+
+    if (CONF_UNIQ(pvt, uac) > TRIBOOL_FALSE) {
+        /* Release ALSA streams when no calls are active so the next call can
+         * trigger a fresh open(). See note in pvt_start(). */
+        soundcard_close(pvt);
+    }
 }
 
 #define SET_BIT(dw_array, bitno)                         \

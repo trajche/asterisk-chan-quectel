@@ -216,6 +216,8 @@ void pvt_get_status(const struct pvt* const pvt, struct ast_json* status);
 
 void pvt_on_create_1st_channel(struct pvt* pvt);
 void pvt_on_remove_last_channel(struct pvt* pvt);
+int  soundcard_init(struct pvt* pvt);
+void soundcard_close(struct pvt* pvt);
 void pvt_reload(restate_time_t when);
 int pvt_enabled(const struct pvt* pvt);
 void pvt_try_restate(struct pvt* pvt);

@@ -150,15 +150,22 @@ static int check_dev_status(struct pvt* const pvt, struct ast_taskprocessor* tps
             break;
 
         case TRIBOOL_TRUE:
-            push_pcm_state_taskprocs(tps, pvt);
+            /* Streams are only open while a call is active (see
+             * pvt_on_create_1st_channel / pvt_on_remove_last_channel).
+             * Skip the periodic state dump when nothing is open. */
+            if (pvt->icard && pvt->ocard) {
+                push_pcm_state_taskprocs(tps, pvt);
+            }
             break;
 
         case TRIBOOL_NONE:
-            push_pcm_state_taskprocs(tps, pvt);
+            if (pvt->icard && pvt->ocard) {
+                push_pcm_state_taskprocs(tps, pvt);
 
-            if (pcm_status(pvt->ocard, pvt->icard)) {
-                ast_log(LOG_ERROR, "[%s][AUDIO][ALSA] Lost connection\n", PVT_ID(pvt));
-                return -1;
+                if (pcm_status(pvt->ocard, pvt->icard)) {
+                    ast_log(LOG_ERROR, "[%s][AUDIO][ALSA] Lost connection\n", PVT_ID(pvt));
+                    return -1;
+                }
             }
             break;
     }
